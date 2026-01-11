@@ -54,14 +54,28 @@ class SocketMixin(BaseTransport):
         payload = None
         if payload_bytes:
             if comp_flag != 0:
-                # TODO: надо выяснить правильный размер распаковки
-                # uncompressed_size = int.from_bytes(payload_bytes[0:4], "big")
-                compressed_data = payload_bytes
+                # Compressed payloads can exceed 99_999 bytes; truncating here causes protocol desync and reconnect storms.
+                # Protocol observed in the wild often prefixes compressed block with 4-byte big-endian uncompressed size.
                 try:
-                    payload_bytes = lz4.block.decompress(
-                        compressed_data,
-                        uncompressed_size=99999,
-                    )
+                    if len(payload_bytes) >= 4:
+                        guessed_size = int.from_bytes(payload_bytes[0:4], "big", signed=False)
+                        # Heuristic guard: ignore obviously bogus sizes to avoid huge allocations.
+                        if 0 < guessed_size <= 32 * 1024 * 1024:
+                            payload_bytes = lz4.block.decompress(
+                                payload_bytes[4:],
+                                uncompressed_size=guessed_size,
+                            )
+                        else:
+                            # Fallback: allow reasonably large payloads
+                            payload_bytes = lz4.block.decompress(
+                                payload_bytes,
+                                uncompressed_size=16 * 1024 * 1024,
+                            )
+                    else:
+                        payload_bytes = lz4.block.decompress(
+                            payload_bytes,
+                            uncompressed_size=16 * 1024 * 1024,
+                        )
                 except lz4.block.LZ4BlockError:
                     return None
             payload = msgpack.unpackb(payload_bytes, raw=False, strict_map_key=False)
@@ -280,13 +294,15 @@ Socket connections may be unstable, SSL issues are possible.
             return data
 
         except (ssl.SSLEOFError, ssl.SSLError, ConnectionError) as conn_err:
-            self.logger.warning("Connection lost, reconnecting...")
+            # Do NOT reconnect here: reconnect attempts can race with higher-level logic and cause connect storms.
+            # Mark disconnected and let the wrapper decide when/how to reconnect (with proper locking).
+            self.logger.warning("Connection lost (will be reconnected by wrapper)")
             self.is_connected = False
             try:
-                await self.connect(self.user_agent)
-            except Exception as exc:
-                self.logger.exception("Reconnect failed")
-                raise exc from conn_err
+                sock.close()
+            except Exception:
+                pass
+            self._socket = None
             raise SocketNotConnectedError from conn_err
         except asyncio.TimeoutError:
             self.logger.exception("Send and wait failed (opcode=%s, seq=%s)", opcode, msg["seq"])

@@ -49,8 +49,10 @@ class SelfMixin(ClientProtocol):
             filename=photo.file_name,
         )
 
+        # iOS: use the same SSL context as the main client (see pymax.core).
+        connector = aiohttp.TCPConnector(ssl=getattr(self, "_ssl_context", False))
         async with (
-            aiohttp.ClientSession() as session,
+            aiohttp.ClientSession(connector=connector) as session,
             session.post(upload_url, data=form) as response,
         ):
             if response.status != HTTPStatus.OK:

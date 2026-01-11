@@ -76,7 +76,9 @@ class MessageMixin(ClientProtocol):
                 file_size = len(file_bytes)
                 self.logger.info("File size from URL: %.2f MB", file_size / (1024 * 1024))
 
-            connector = TCPConnector(limit=0)
+            # iOS: we intentionally disable TLS verification in pymax core
+            # because embedded CPython does not have access to system CA store.
+            connector = TCPConnector(limit=0, ssl=getattr(self, "_ssl_context", False))
             timeout = aiohttp.ClientTimeout(total=None, sock_read=None, sock_connect=30)
 
             headers = {
@@ -200,7 +202,7 @@ class MessageMixin(ClientProtocol):
             file_size = len(file_bytes)
 
             # Настройки для ClientSession
-            connector = TCPConnector(limit=0)
+            connector = TCPConnector(limit=0, ssl=getattr(self, "_ssl_context", False))
             timeout = aiohttp.ClientTimeout(total=900, sock_read=60)  # 15 минут на видео
 
             headers = {
@@ -282,12 +284,10 @@ class MessageMixin(ClientProtocol):
                 content_type=photo_data[1],
             )
 
+            connector = TCPConnector(ssl=getattr(self, "_ssl_context", False))
             async with (
-                ClientSession() as session,
-                session.post(
-                    url=url,
-                    data=form,
-                ) as response,
+                ClientSession(connector=connector) as session,
+                session.post(url=url, data=form) as response,
             ):
                 if response.status != HTTPStatus.OK:
                     self.logger.error(f"Upload failed with status {response.status}")
